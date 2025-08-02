@@ -1,3 +1,15 @@
+// Build Instructions:
+// 1. Install dependencies:
+//      sudo apt update
+//      sudo apt install qt6-base-dev qt6-multimedia-dev qt6-multimediawidgets-dev
+// 2. In the project directory:
+//      qmake6 UVCast.pro
+//      make
+// 3. Run:
+//      export QT_MULTIMEDIA_PREFERRED_BACKEND=gstreamer
+//      ./UVCast
+
+// File: main.cpp
 #include <QApplication>
 #include <QWidget>
 #include <QtGlobal>
@@ -11,6 +23,7 @@
 #include <QAudioSink>
 #include <QVideoWidget>
 #include <QComboBox>
+#include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QVariant>
@@ -24,7 +37,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
     QWidget window;
-    window.setWindowTitle("UVCast - UVC Capture");
+    window.setWindowTitle("UVCast");
     window.setMinimumSize(800, 600);
 
     // Control panel
@@ -41,10 +54,14 @@ int main(int argc, char *argv[]) {
         audioCombo->addItem(dev.description(), QVariant::fromValue(dev));
     controls->addWidget(audioCombo);
 
+    // Fullscreen toggle button
+    QPushButton *fsButton = new QPushButton("Full Screen");
+    controls->addWidget(fsButton);
+
     // Video preview
     QVideoWidget *videoWidget = new QVideoWidget;
 
-    // Capture session (video)
+    // Capture session (video only)
     QMediaCaptureSession session(&window);
     QCamera *camera = new QCamera(videoList.value(0), &window);
     session.setCamera(camera);
@@ -73,10 +90,16 @@ int main(int argc, char *argv[]) {
         });
     };
 
-    // Initial audio
+    // Initial audio setup
     setupAudioPipeline(audioList.value(0));
 
-    // Handlers
+    // Connect fullscreen toggle
+    QObject::connect(fsButton, &QPushButton::clicked, [&](bool){
+        bool fs = videoWidget->isFullScreen();
+        videoWidget->setFullScreen(!fs);
+    });
+
+    // Handlers for dynamic device switching
     QObject::connect(videoCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
                      [&](int){
         camera->stop(); delete camera;
@@ -92,7 +115,7 @@ int main(int argc, char *argv[]) {
         setupAudioPipeline(dev);
     });
 
-    // Layout
+    // Layout assembly
     QVBoxLayout *layout = new QVBoxLayout(&window);
     layout->addLayout(controls);
     layout->addWidget(videoWidget);
