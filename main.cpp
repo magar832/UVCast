@@ -1,14 +1,3 @@
-// Build Instructions:
-// 1. Install dependencies:
-//      sudo apt update
-//      sudo apt install qt6-base-dev qt6-multimedia-dev qt6-multimediawidgets-dev
-// 2. In the project directory:
-//      qmake6 UVCast.pro
-//      make
-// 3. Run:
-//      export QT_MULTIMEDIA_PREFERRED_BACKEND=gstreamer
-//      ./UVCast
-
 // File: main.cpp
 #include <QApplication>
 #include <QWidget>
@@ -26,12 +15,67 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QVariant>
 #include <QMetaType>
 #include <QIODevice>
+#include <QKeyEvent>
+#include <QMessageBox>
 
 Q_DECLARE_METATYPE(QCameraDevice)
 Q_DECLARE_METATYPE(QAudioDevice)
+
+class AudioBridge {
+public:
+    AudioBridge(QObject *parent = nullptr) : parent(parent) {}
+    ~AudioBridge() { teardown(); }
+
+    void setup(const QAudioDevice &inDev) {
+        teardown();
+        if (!inDev.isNull()) {
+            QAudioFormat fmt = inDev.preferredFormat();
+            QAudioDevice outDev = QMediaDevices::defaultAudioOutput();
+            audioSrc = new QAudioSource(inDev, fmt, parent);
+            audioSnk = new QAudioSink(outDev, fmt, parent);
+            srcIO = audioSrc->start();
+            snkIO = audioSnk->start();
+            QObject::connect(srcIO, &QIODevice::readyRead, [=] {
+                QByteArray data = srcIO->readAll();
+                snkIO->write(data);
+            });
+        }
+    }
+
+private:
+    void teardown() {
+        if (audioSrc) { audioSrc->stop(); delete audioSrc; audioSrc = nullptr; }
+        if (audioSnk) { audioSnk->stop(); delete audioSnk; audioSnk = nullptr; }
+        srcIO = nullptr;
+        snkIO = nullptr;
+    }
+
+    QObject *parent;
+    QAudioSource *audioSrc = nullptr;
+    QAudioSink *audioSnk = nullptr;
+    QIODevice *srcIO = nullptr;
+    QIODevice *snkIO = nullptr;
+};
+
+// Custom widget to handle Esc key for fullscreen exit
+class VideoWidgetWithEsc : public QVideoWidget {
+public:
+    using QVideoWidget::QVideoWidget;
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override {
+        if (event->key() == Qt::Key_Escape && isFullScreen()) {
+            setFullScreen(false);
+            event->accept();
+        } else {
+            QVideoWidget::keyPressEvent(event);
+        }
+    }
+};
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -42,66 +86,59 @@ int main(int argc, char *argv[]) {
 
     // Control panel
     QHBoxLayout *controls = new QHBoxLayout;
+    controls->addWidget(new QLabel("Video Device:"));
     QComboBox *videoCombo = new QComboBox;
-    auto videoList = QMediaDevices::videoInputs();
-    for (const auto &dev : videoList)
-        videoCombo->addItem(dev.description(), QVariant::fromValue(dev));
     controls->addWidget(videoCombo);
 
+    controls->addWidget(new QLabel("Audio Device:"));
     QComboBox *audioCombo = new QComboBox;
-    auto audioList = QMediaDevices::audioInputs();
-    for (const auto &dev : audioList)
-        audioCombo->addItem(dev.description(), QVariant::fromValue(dev));
     controls->addWidget(audioCombo);
 
-    // Fullscreen toggle button
     QPushButton *fsButton = new QPushButton("Full Screen");
     controls->addWidget(fsButton);
 
     // Video preview
-    QVideoWidget *videoWidget = new QVideoWidget;
+    VideoWidgetWithEsc *videoWidget = new VideoWidgetWithEsc;
 
-    // Capture session (video only)
+    // Get available devices
+    auto videoList = QMediaDevices::videoInputs();
+    auto audioList = QMediaDevices::audioInputs();
+
+    for (const auto &dev : videoList)
+        videoCombo->addItem(dev.description(), QVariant::fromValue(dev));
+
+    for (const auto &dev : audioList)
+        audioCombo->addItem(dev.description(), QVariant::fromValue(dev));
+
+    // Check for devices
+    if (videoList.isEmpty()) {
+        QMessageBox::critical(nullptr, "No Camera", "No video input devices found.");
+        return 1;
+    }
+    if (audioList.isEmpty()) {
+        QMessageBox::critical(nullptr, "No Audio", "No audio input devices found.");
+        return 1;
+    }
+
+    // Capture session
     QMediaCaptureSession session(&window);
     QCamera *camera = new QCamera(videoList.value(0), &window);
     session.setCamera(camera);
     session.setVideoOutput(videoWidget);
     camera->start();
 
-    // Manual audio pipeline: pull from source, push to sink
-    auto setupAudioPipeline = [&](const QAudioDevice &inDev) {
-        static QAudioSource *audioSrc = nullptr;
-        static QAudioSink   *audioSnk = nullptr;
-        static QIODevice    *srcIO   = nullptr;
-        static QIODevice    *snkIO   = nullptr;
-        // Teardown old
-        if (audioSrc) { audioSrc->stop(); delete audioSrc; audioSrc = nullptr; }
-        if (audioSnk) { audioSnk->stop(); delete audioSnk; audioSnk = nullptr; }
-        // Setup new
-        QAudioFormat fmt = inDev.preferredFormat();
-        QAudioDevice outDev = QMediaDevices::defaultAudioOutput();
-        audioSrc = new QAudioSource(inDev, fmt, &window);
-        audioSnk = new QAudioSink(outDev, fmt, &window);
-        srcIO = audioSrc->start();
-        snkIO = audioSnk->start();
-        QObject::connect(srcIO, &QIODevice::readyRead, [&](void){
-            QByteArray data = srcIO->readAll();
-            snkIO->write(data);
-        });
-    };
+    // Audio bridge
+    AudioBridge audioBridge(&window);
+    audioBridge.setup(audioList.value(0));
 
-    // Initial audio setup
-    setupAudioPipeline(audioList.value(0));
-
-    // Connect fullscreen toggle
-    QObject::connect(fsButton, &QPushButton::clicked, [&](bool){
-        bool fs = videoWidget->isFullScreen();
-        videoWidget->setFullScreen(!fs);
+    // Fullscreen toggle
+    QObject::connect(fsButton, &QPushButton::clicked, [=] {
+        videoWidget->setFullScreen(!videoWidget->isFullScreen());
+        videoWidget->setFocus();  // so Esc key works immediately
     });
 
-    // Handlers for dynamic device switching
-    QObject::connect(videoCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                     [&](int){
+    // Device switching
+    QObject::connect(videoCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int) {
         camera->stop(); delete camera;
         auto dev = videoCombo->currentData().value<QCameraDevice>();
         camera = new QCamera(dev, &window);
@@ -109,13 +146,12 @@ int main(int argc, char *argv[]) {
         camera->start();
     });
 
-    QObject::connect(audioCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                     [&](int){
+    QObject::connect(audioCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int) {
         auto dev = audioCombo->currentData().value<QAudioDevice>();
-        setupAudioPipeline(dev);
+        audioBridge.setup(dev);
     });
 
-    // Layout assembly
+    // Layout
     QVBoxLayout *layout = new QVBoxLayout(&window);
     layout->addLayout(controls);
     layout->addWidget(videoWidget);
