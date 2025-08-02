@@ -70,12 +70,16 @@ protected:
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape && isFullScreen()) {
             setFullScreen(false);
+            updateGeometry();  // trigger a relayout
+            if (parentWidget() && parentWidget()->layout())
+                parentWidget()->layout()->activate();
             event->accept();
         } else {
             QVideoWidget::keyPressEvent(event);
         }
     }
 };
+
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
