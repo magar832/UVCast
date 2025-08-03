@@ -21,6 +21,7 @@
 #include <QIODevice>
 #include <QKeyEvent>
 #include <QMessageBox>
+#include <QWindow>
 
 Q_DECLARE_METATYPE(QCameraDevice)
 Q_DECLARE_METATYPE(QAudioDevice)
@@ -70,9 +71,20 @@ protected:
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_Escape && isFullScreen()) {
             setFullScreen(false);
-            updateGeometry();  // trigger a relayout
-            if (parentWidget() && parentWidget()->layout())
-                parentWidget()->layout()->activate();
+    
+            if (QWidget *parent = parentWidget()) {
+                if (QLayout *layout = parent->layout()) {
+                    layout->removeWidget(this);
+                    layout->addWidget(this);  // re-add to ensure reintegration
+                    updateGeometry();
+                    parent->updateGeometry();
+                    layout->activate();
+		    QApplication::processEvents();
+                    parent->update();
+                    this->show();  // make sure it's visible
+                }
+            }
+    
             event->accept();
         } else {
             QVideoWidget::keyPressEvent(event);
@@ -136,11 +148,24 @@ int main(int argc, char *argv[]) {
     audioBridge.setup(audioList.value(0));
 
     // Fullscreen toggle
-    QObject::connect(fsButton, &QPushButton::clicked, [=] {
-        videoWidget->setFullScreen(!videoWidget->isFullScreen());
-        videoWidget->setFocus();  // so Esc key works immediately
+    QObject::connect(fsButton, &QPushButton::clicked, [&] {
+      if (!videoWidget->isFullScreen()) {
+          // Find the screen the main window is on
+          QScreen *targetScreen = window.screen();
+          if (targetScreen && videoWidget->windowHandle()) {
+              videoWidget->windowHandle()->setScreen(targetScreen);  // Qt6-safe
+          }
+  
+          videoWidget->setFullScreen(true);
+          videoWidget->setFocus();  // for Esc key
+      } else {
+          videoWidget->setFullScreen(false);
+          videoWidget->updateGeometry();
+          if (window.layout()) window.layout()->activate();
+      }
     });
 
+ 
     // Device switching
     QObject::connect(videoCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int) {
         camera->stop(); delete camera;
